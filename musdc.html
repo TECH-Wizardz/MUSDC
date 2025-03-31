@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple MockUSDC Faucet</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f4f8;
+            color: #333;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background-color: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+        h1 {
+            color: #2563eb;
+            margin-bottom: 20px;
+        }
+        .network-badge {
+            background-color: #8a2be2; /* Purple for Linea */
+            color: white;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        button {
+            background-color: #2563eb;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 15px 0;
+            width: 100%;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #1d4ed8;
+        }
+        button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        .status {
+            margin: 15px 0;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .error {
+            background-color: #fee2e2;
+            color: #ef4444;
+        }
+        .success {
+            background-color: #d1fae5;
+            color: #10b981;
+        }
+        .info {
+            background-color: #e0f2fe;
+            color: #0284c7;
+        }
+        .countdown {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin: 15px 0;
+            color: #4b5563;
+        }
+        .address {
+            background-color: #f3f4f6;
+            padding: 8px;
+            border-radius: 5px;
+            font-family: monospace;
+            word-break: break-all;
+            margin: 10px 0;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MockUSDC Faucet</h1>
+        <div class="network-badge">Linea Sepolia Testnet</div>
+        
+        <div id="wallet-section">
+            <button id="connect-wallet">Connect Wallet</button>
+            <div id="wallet-status" class="status"></div>
+            <div id="address-display" style="display:none;">
+                <div>Connected Address:</div>
+                <div id="user-address" class="address"></div>
+            </div>
+        </div>
+        
+        <div id="faucet-section" style="display:none;">
+            <p>Get 500 MockUSDC tokens for testing</p>
+            <button id="request-tokens">Request 500 MockUSDC</button>
+            <div id="request-status" class="status"></div>
+            
+            <div id="countdown-section" style="display:none;">
+                <p>Next request available in:</p>
+                <div id="countdown" class="countdown">--:--</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Constants
+        const LINEA_SEPOLIA_CHAIN_ID = "0xe705";  // 59141 in decimal
+        
+        // REPLACE THIS WITH YOUR DEPLOYED CONTRACT ADDRESS
+        const FAUCET_ADDRESS = "0x001a75143Cc3a37640C0955292A254d4E0748708"; 
+        
+        // Fixed amount - 500 tokens with 6 decimals (like USDC)
+        const TOKEN_DECIMALS = 6;
+        
+        // Simplified ABIs
+        const FAUCET_ABI = [
+            "function token() external view returns (address)",
+            "function requestTokens() external",
+            "function lastRequestTime(address) external view returns (uint256)",
+            "function cooldownTime() external view returns (uint256)"
+        ];
+        
+        const TOKEN_ABI = [
+            "function symbol() external view returns (string)",
+            "function decimals() external view returns (uint8)",
+            "function balanceOf(address) external view returns (uint256)"
+        ];
+        
+        // DOM Elements
+        const connectBtn = document.getElementById('connect-wallet');
+        const requestBtn = document.getElementById('request-tokens');
+        const walletStatus = document.getElementById('wallet-status');
+        const requestStatus = document.getElementById('request-status');
+        const userAddress = document.getElementById('user-address');
+        const addressDisplay = document.getElementById('address-display');
+        const faucetSection = document.getElementById('faucet-section');
+        const countdownSection = document.getElementById('countdown-section');
+        const countdownDisplay = document.getElementById('countdown');
+        
+        // Variables
+        let provider, signer, account;
+        let faucetContract, tokenContract;
+        let cooldownTime = 3600; // Default 1 hour in seconds
+        let lastRequestTime = 0;
+        let countdownInterval;
+        
+        // Connect wallet
+        async function connectWallet() {
+            clearStatus();
+            
+            try {
+                // Initialize provider
+                if (window.ethereum) {
+                    provider = new ethers.providers.Web3Provider(window.ethereum);
+                    
+                    // Request accounts
+                    const accounts = await provider.send("eth_requestAccounts", []);
+                    if (accounts.length === 0) {
+                        showStatus(walletStatus, "No accounts found. Please unlock MetaMask.", "error");
+                        return;
+                    }
+                    
+                    // Check network
+                    const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+                    if (chainId !== LINEA_SEPOLIA_CHAIN_ID) {
+                        showStatus(walletStatus, "Switching to Linea Sepolia...", "info");
+                        
+                        try {
+                            // Try to switch network
+                            await window.ethereum.request({
+                                method: 'wallet_switchEthereumChain',
+                                params: [{ chainId: LINEA_SEPOLIA_CHAIN_ID }],
+                            });
+                        } catch (switchError) {
+                            // Add network if not available
+                            if (switchError.code === 4902) {
+                                try {
+                                    await window.ethereum.request({
+                                        method: 'wallet_addEthereumChain',
+                                        params: [
+                                            {
+                                                chainId: LINEA_SEPOLIA_CHAIN_ID,
+                                                chainName: 'Linea Sepolia Testnet',
+                                                nativeCurrency: {
+                                                    name: 'Linea Sepolia ETH',
+                                                    symbol: 'ETH',
+                                                    decimals: 18
+                                                },
+                                                rpcUrls: ['https://linea-sepolia.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161'],
+                                                blockExplorerUrls: ['https://sepolia.lineascan.build/']
+                                            },
+                                        ],
+                                    });
+                                } catch (addError) {
+                                    showStatus(walletStatus, "Please add Linea Sepolia network manually", "error");
+                                    return;
+                                }
+                            } else {
+                                showStatus(walletStatus, "Please switch to Linea Sepolia network manually", "error");
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // Set account
+                    account = accounts[0];
+                    signer = provider.getSigner();
+                    
+                    // Display address
+                    userAddress.textContent = account;
+                    addressDisplay.style.display = "block";
+                    
+                    // Initialize contracts
+                    try {
+                        faucetContract = new ethers.Contract(FAUCET_ADDRESS, FAUCET_ABI, signer);
+                        
+                        // Check contract code exists
+                        const code = await provider.getCode(FAUCET_ADDRESS);
+                        if (code === '0x') {
+                            showStatus(walletStatus, "No contract found at the specified address", "error");
+                            return;
+                        }
+                        
+                        // Get token address and create token contract
+                        const tokenAddress = await faucetContract.token();
+                        tokenContract = new ethers.Contract(tokenAddress, TOKEN_ABI, signer);
+                        
+                        // Get cooldown time
+                        cooldownTime = (await faucetContract.cooldownTime()).toNumber();
+                        
+                        // Show faucet section
+                        faucetSection.style.display = "block";
+                        
+                        // Check if user needs to wait for cooldown
+                        await updateCooldownStatus();
+                        
+                        // Setup cooldown timer
+                        countdownInterval = setInterval(updateCooldownStatus, 1000);
+                        
+                        // Connected successfully
+                        connectBtn.textContent = "Wallet Connected";
+                        connectBtn.disabled = true;
+                        showStatus(walletStatus, "Connected to Linea Sepolia", "success");
+                    } catch (error) {
+                        console.error("Contract initialization error:", error);
+                        showStatus(walletStatus, "Failed to initialize contract. Check contract address.", "error");
+                    }
+                } else {
+                    showStatus(walletStatus, "MetaMask not detected. Please install MetaMask.", "error");
+                }
+            } catch (error) {
+                console.error("Connection error:", error);
+                showStatus(walletStatus, "Failed to connect: " + (error.message || "Unknown error"), "error");
+            }
+        }
+        
+        // Request tokens
+        async function requestTokens() {
+            clearStatus();
+            
+            try {
+                // Disable button during transaction
+                requestBtn.disabled = true;
+                showStatus(requestStatus, "Requesting tokens...", "info");
+                
+                // Send request
+                const tx = await faucetContract.requestTokens();
+                showStatus(requestStatus, "Transaction submitted, waiting for confirmation...", "info");
+                
+                // Wait for confirmation
+                await tx.wait();
+                
+                // Update UI
+                lastRequestTime = Math.floor(Date.now() / 1000);
+                updateCooldownStatus();
+                
+                showStatus(requestStatus, "Successfully received 500 MockUSDC!", "success");
+            } catch (error) {
+                console.error("Token request error:", error);
+                
+                let errorMsg = "Failed to request tokens";
+                if (error.message) {
+                    if (error.message.includes("Wait before requesting again")) {
+                        errorMsg = "Please wait before requesting again";
+                    } else if (error.message.includes("Faucet empty")) {
+                        errorMsg = "Faucet is empty. Try again later.";
+                    } else {
+                        errorMsg = "Error: " + error.message.split('(')[0].trim();
+                    }
+                }
+                
+                showStatus(requestStatus, errorMsg, "error");
+                requestBtn.disabled = false;
+            }
+        }
+        
+        // Update cooldown status
+        async function updateCooldownStatus() {
+            try {
+                if (faucetContract && account) {
+                    // Get last request time from contract if we don't have it
+                    if (lastRequestTime === 0) {
+                        lastRequestTime = (await faucetContract.lastRequestTime(account)).toNumber();
+                    }
+                    
+                    const now = Math.floor(Date.now() / 1000);
+                    const timeSinceRequest = now - lastRequestTime;
+                    
+                    if (lastRequestTime > 0 && timeSinceRequest < cooldownTime) {
+                        // User is in cooldown period
+                        const remainingTime = cooldownTime - timeSinceRequest;
+                        const minutes = Math.floor(remainingTime / 60);
+                        const seconds = remainingTime % 60;
+                        
+                        // Update countdown display
+                        countdownDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                        countdownSection.style.display = "block";
+                        requestBtn.disabled = true;
+                    } else {
+                        // Cooldown has expired
+                        countdownSection.style.display = "none";
+                        requestBtn.disabled = false;
+                    }
+                }
+            } catch (error) {
+                console.error("Error updating cooldown status:", error);
+            }
+        }
+        
+        // Helper for showing status messages
+        function showStatus(element, message, type) {
+            element.textContent = message;
+            element.className = "status " + type;
+            element.style.display = "block";
+        }
+        
+        // Clear status messages
+        function clearStatus() {
+            walletStatus.textContent = "";
+            walletStatus.className = "status";
+            walletStatus.style.display = "none";
+            
+            requestStatus.textContent = "";
+            requestStatus.className = "status";
+            requestStatus.style.display = "none";
+        }
+        
+        // Event listeners
+        connectBtn.addEventListener("click", connectWallet);
+        requestBtn.addEventListener("click", requestTokens);
+        
+        // Handle account changes
+        if (window.ethereum) {
+            window.ethereum.on('accountsChanged', () => {
+                window.location.reload();
+            });
+            
+            window.ethereum.on('chainChanged', () => {
+                window.location.reload();
+            });
+        }
+    </script>
+</body>
+</html>
